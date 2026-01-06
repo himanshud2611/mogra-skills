@@ -1,0 +1,120 @@
+name: Morning Briefing
+
+on:
+  schedule:
+    # 9:00 AM IST = 3:30 AM UTC
+    - cron: '30 3 * * *'
+  workflow_dispatch:  # Manual trigger for testing
+
+jobs:
+  send-briefing:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Send Morning Briefing
+        env:
+          CAL_API_KEY: ${{ secrets.CAL_API_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          python3 << 'EOF'
+          import os
+          import json
+          import urllib.request
+          from datetime import datetime, timedelta, timezone
+
+          # Config
+          CAL_API_KEY = os.environ['CAL_API_KEY']
+          TELEGRAM_BOT_TOKEN = os.environ['TELEGRAM_BOT_TOKEN']
+          TELEGRAM_CHAT_ID = os.environ['TELEGRAM_CHAT_ID']
+
+          # IST timezone (UTC+5:30)
+          IST = timezone(timedelta(hours=5, minutes=30))
+
+          def get_cal_bookings():
+              url = f"https://api.cal.com/v1/bookings?apiKey={CAL_API_KEY}"
+              req = urllib.request.Request(url)
+              with urllib.request.urlopen(req) as response:
+                  return json.loads(response.read()).get('bookings', [])
+
+          def send_telegram(message):
+              url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+              data = json.dumps({
+                  'chat_id': TELEGRAM_CHAT_ID,
+                  'text': message,
+                  'parse_mode': 'HTML',
+                  'disable_web_page_preview': True
+              }).encode('utf-8')
+              req = urllib.request.Request(url, data=data, headers={'Content-Type': 'application/json'})
+              with urllib.request.urlopen(req) as response:
+                  return json.loads(response.read())
+
+          def main():
+              now = datetime.now(IST)
+              today = now.date()
+              week_end = today + timedelta(days=7)
+              
+              bookings = get_cal_bookings()
+              today_meetings = []
+              upcoming_meetings = []
+              
+              for b in bookings:
+                  if b.get('status') == 'CANCELLED':
+                      continue
+                  
+                  start_str = b['startTime'].replace('Z', '+00:00')
+                  end_str = b['endTime'].replace('Z', '+00:00')
+                  start = datetime.fromisoformat(start_str).astimezone(IST)
+                  end = datetime.fromisoformat(end_str).astimezone(IST)
+                  
+                  meeting = {
+                      'time': start.strftime('%I:%M %p'),
+                      'end_time': end.strftime('%I:%M %p'),
+                      'title': b.get('title', 'Meeting'),
+                      'attendees': [a['name'] for a in b.get('attendees', [])],
+                      'link': b.get('metadata', {}).get('videoCallUrl', ''),
+                      'start': start
+                  }
+                  
+                  if start.date() == today:
+                      today_meetings.append(meeting)
+                  elif today < start.date() <= week_end:
+                      meeting['date'] = start.strftime('%a, %b %d')
+                      upcoming_meetings.append(meeting)
+              
+              today_meetings.sort(key=lambda x: x['start'])
+              upcoming_meetings.sort(key=lambda x: x['start'])
+              
+              # Build message
+              msg = f"☀️ <b>Morning Briefing</b>\n"
+              msg += f"📅 {today.strftime('%A, %B %d, %Y')}\n\n"
+              
+              if today_meetings:
+                  msg += f"<b>📌 Today's Meetings ({len(today_meetings)})</b>\n\n"
+                  for m in today_meetings:
+                      msg += f"⏰ <b>{m['time']}</b> - {m['end_time']}\n"
+                      msg += f"📋 {m['title']}\n"
+                      if m['attendees']:
+                          msg += f"👤 {', '.join(m['attendees'])}\n"
+                      if m['link']:
+                          msg += f"🔗 <a href=\"{m['link']}\">Join Meeting</a>\n"
+                      msg += "\n"
+              else:
+                  msg += "✨ <b>No meetings today!</b> Your calendar is clear.\n\n"
+              
+              if upcoming_meetings:
+                  msg += f"<b>📆 Upcoming This Week ({len(upcoming_meetings)})</b>\n"
+                  for m in upcoming_meetings[:5]:
+                      msg += f"• {m['date']} {m['time']} - {m['title']}\n"
+              
+              msg += "\n💡 <i>Have a productive day!</i>"
+              
+              result = send_telegram(msg)
+              if result.get('ok'):
+                  print("✅ Morning briefing sent!")
+              else:
+                  print(f"❌ Failed: {result}")
+
+          if __name__ == '__main__':
+              main()
+          EOF
